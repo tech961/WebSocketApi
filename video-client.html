@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SignalR Video Client</title>
+    <script src="https://cdn.jsdelivr.net/npm/@microsoft/signalr@7.0.5/dist/browser/signalr.min.js" integrity="sha384-m3PFYpgbn8cC8zPCsocnJp6xui9rHj+Xcnl5V3/Kd1UUlZdw1XrWULVHLb/VQVtQ" crossorigin="anonymous"></script>
+    <style>
+        :root {
+            color-scheme: light dark;
+            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            background: #f5f5f5;
+        }
+
+        h1 {
+            margin: 0;
+        }
+
+        fieldset {
+            border-radius: 0.75rem;
+            border: 1px solid #ccc;
+            padding: 1rem 1.5rem;
+            background: white;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        label {
+            font-weight: 600;
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        input[type="url"],
+        input[type="text"] {
+            padding: 0.65rem 0.75rem;
+            border-radius: 0.6rem;
+            border: 1px solid #bbb;
+            font-size: 1rem;
+        }
+
+        button {
+            align-self: flex-start;
+            padding: 0.6rem 1.1rem;
+            border-radius: 0.6rem;
+            border: none;
+            font-weight: 600;
+            color: white;
+            background: #2563eb;
+            cursor: pointer;
+        }
+
+        button[disabled] {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        #log {
+            font-family: "Fira Code", monospace;
+            background: black;
+            color: #e2e8f0;
+            padding: 0.75rem;
+            border-radius: 0.6rem;
+            min-height: 5rem;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+
+        video {
+            max-width: min(720px, 100%);
+            border-radius: 0.75rem;
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.2);
+            background: black;
+        }
+
+        .metadata {
+            font-size: 0.95rem;
+            color: #4b5563;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>SignalR Video Streaming Client</h1>
+        <p>Connect to the <code>/hubs/video</code> hub and play videos pushed from the upload API.</p>
+    </header>
+
+    <fieldset>
+        <legend>Connection</legend>
+        <label>
+            Hub URL
+            <input id="hubUrl" type="url" value="http://localhost:5000/hubs/video" required />
+        </label>
+        <label>
+            API Upload URL
+            <input id="apiUrl" type="url" value="http://localhost:5000/api/video/upload" required />
+        </label>
+        <div>
+            <button id="connectBtn">Connect</button>
+            <button id="disconnectBtn" disabled>Disconnect</button>
+        </div>
+        <div class="metadata" id="status">Status: Disconnected</div>
+    </fieldset>
+
+    <fieldset>
+        <legend>Upload Helper</legend>
+        <label>
+            Pick a video to upload to the API (optional)
+            <input id="videoFile" type="file" accept="video/*" />
+        </label>
+        <button id="uploadBtn">Upload to API</button>
+    </fieldset>
+
+    <fieldset>
+        <legend>Video Player</legend>
+        <div class="metadata" id="videoInfo">Awaiting video...</div>
+        <video id="videoPlayer" controls></video>
+    </fieldset>
+
+    <fieldset>
+        <legend>Activity Log</legend>
+        <div id="log"></div>
+    </fieldset>
+
+    <script>
+        const hubUrlInput = document.getElementById("hubUrl");
+        const apiUrlInput = document.getElementById("apiUrl");
+        const connectBtn = document.getElementById("connectBtn");
+        const disconnectBtn = document.getElementById("disconnectBtn");
+        const uploadBtn = document.getElementById("uploadBtn");
+        const videoFileInput = document.getElementById("videoFile");
+        const videoPlayer = document.getElementById("videoPlayer");
+        const logElement = document.getElementById("log");
+        const statusElement = document.getElementById("status");
+        const videoInfoElement = document.getElementById("videoInfo");
+
+        let connection = null;
+        let currentObjectUrl = null;
+
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            logElement.textContent += `[${timestamp}] ${message}\n`;
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+
+        function updateStatus(text) {
+            statusElement.textContent = `Status: ${text}`;
+        }
+
+        function cleanupVideo() {
+            if (currentObjectUrl) {
+                URL.revokeObjectURL(currentObjectUrl);
+                currentObjectUrl = null;
+            }
+            videoPlayer.removeAttribute("src");
+            videoPlayer.load();
+        }
+
+        function base64ToBlob(base64, contentType) {
+            const binaryString = atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            return new Blob([bytes], { type: contentType });
+        }
+
+        async function connect() {
+            if (connection) {
+                await disconnect();
+            }
+
+            const hubUrl = hubUrlInput.value.trim();
+
+            if (!hubUrl) {
+                alert("Please provide the SignalR hub URL.");
+                return;
+            }
+
+            connection = new signalR.HubConnectionBuilder()
+                .withUrl(hubUrl)
+                .withAutomaticReconnect()
+                .configureLogging(signalR.LogLevel.Information)
+                .build();
+
+            connection.on("ReceiveVideo", handleVideoMessage);
+
+            connection.onreconnecting(error => {
+                log(`Reconnecting… ${error ? error.message : ""}`);
+                updateStatus("Reconnecting");
+            });
+
+            connection.onreconnected(() => {
+                log("Reconnected to hub.");
+                updateStatus("Connected");
+            });
+
+            connection.onclose(error => {
+                log(`Connection closed. ${error ? error.message : ""}`);
+                updateStatus("Disconnected");
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+            });
+
+            try {
+                await connection.start();
+                log(`Connected to ${hubUrl}.`);
+                updateStatus("Connected");
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+            } catch (error) {
+                log(`Failed to connect: ${error.message}`);
+                updateStatus("Disconnected");
+            }
+        }
+
+        async function disconnect() {
+            if (!connection) {
+                return;
+            }
+
+            try {
+                await connection.stop();
+                log("Disconnected from hub.");
+            } catch (error) {
+                log(`Error while disconnecting: ${error.message}`);
+            } finally {
+                connection = null;
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+                updateStatus("Disconnected");
+            }
+        }
+
+        function handleVideoMessage(payload) {
+            if (!payload || !payload.data) {
+                log("Received malformed video payload.");
+                return;
+            }
+
+            cleanupVideo();
+            const blob = base64ToBlob(payload.data, payload.contentType || "video/mp4");
+            currentObjectUrl = URL.createObjectURL(blob);
+            videoPlayer.src = currentObjectUrl;
+            videoPlayer.load();
+            videoPlayer.play().catch(() => {
+                log("Autoplay prevented. Press play to watch the video.");
+            });
+
+            videoInfoElement.textContent = `Playing: ${payload.fileName || "Unnamed file"} (${(payload.length / 1024 / 1024).toFixed(2)} MB)`;
+            log(`Received video '${payload.fileName}' (${payload.contentType}, ${payload.length} bytes).`);
+        }
+
+        async function upload() {
+            const apiUrl = apiUrlInput.value.trim();
+            if (!apiUrl) {
+                alert("Please provide the upload API URL.");
+                return;
+            }
+
+            const file = videoFileInput.files?.[0];
+            if (!file) {
+                alert("Select a video file to upload.");
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append("video", file, file.name);
+
+            log(`Uploading '${file.name}' to ${apiUrl}...`);
+            uploadBtn.disabled = true;
+
+            try {
+                const response = await fetch(apiUrl, {
+                    method: "POST",
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(text || `Upload failed with status ${response.status}`);
+                }
+
+                log("Upload completed. Waiting for broadcast…");
+            } catch (error) {
+                log(`Upload error: ${error.message}`);
+            } finally {
+                uploadBtn.disabled = false;
+            }
+        }
+
+        connectBtn.addEventListener("click", connect);
+        disconnectBtn.addEventListener("click", disconnect);
+        uploadBtn.addEventListener("click", upload);
+
+        window.addEventListener("beforeunload", () => {
+            if (connection) {
+                connection.stop();
+            }
+            cleanupVideo();
+        });
+    </script>
+</body>
+</html>
