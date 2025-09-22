@@ -1,7 +1,10 @@
 using Microsoft.OpenApi.Models;
 using WebSocket.Hubs;
+using WebSocket.Options;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.Configure<StaticVideoOptions>(builder.Configuration.GetSection(StaticVideoOptions.SectionName));
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -11,7 +14,7 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "WebSocket API",
         Version = "v1",
-        Description = "APIs for broadcasting uploaded videos to SignalR clients."
+        Description = "APIs for broadcasting videos to SignalR clients."
     });
 });
 
@@ -25,6 +28,8 @@ app.UseSwaggerUI(options =>
     options.SwaggerEndpoint("/swagger/v1/swagger.json", "WebSocket API v1");
     options.RoutePrefix = string.Empty;
 });
+
+app.UseStaticFiles();
 
 app.UseAuthorization();
 
